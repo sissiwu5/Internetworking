@@ -92,46 +92,118 @@ public class CPProtocol extends Protocol {
 
     @Override
     public Msg receive() throws IOException, IWProtocolException {
-        // Task 1.2.2: complete receive method
-        Msg receivedMsg = null;
+        // The server logic: If we are a cookie server, we must handle incoming cookie requests
+        if (role == cp_role.COOKIE) {
+            // Continuously receive messages and process them
+            while (true) {
+                Msg receivedMsg = null;
+                try {
+                    receivedMsg = this.PhyProto.receive(CP_TIMEOUT);
+                    if (receivedMsg == null) continue;
 
+                    // Check protocol id
+                    if (((PhyConfiguration) receivedMsg.getConfiguration()).getPid() != proto_id.CP) {
+                        // Not a CP message, ignore
+                        continue;
+                    }
+
+                    String data = receivedMsg.getData();
+                    if (data.startsWith("cp cookie_request")) {
+                        // This is a cookie request
+                        processCookieRequest(receivedMsg);
+                        // After processing cookie request, continue the server loop
+                        continue;
+                    } else {
+                        // for handling other message types (e.g., verification requests)
+                        // At the moment, ignore
+                        continue;
+                    }
+
+                } catch (SocketTimeoutException e) {
+                    // If timeout, continue to listen
+                } catch (Exception e) {
+                    // Some parsing or IO exception
+                    continue;
+                }
+            }
+        } else if (role == cp_role.CLIENT) {
+            // Attempt to receive response from command server
+            return receiveClientResponse();
+        } else if (role == cp_role.COMMAND) {
+            // handle command messages
+            return null;
+        }
+        return null;
+    }
+    private Msg receiveClientResponse() throws IOException, IWProtocolException {
         final int amountOfAttempts = 3;
         int attempts = 0;
+        Msg receivedMsg = null;
 
         while (attempts < amountOfAttempts) {
             try {
-                // 2a. Wait for response with a 3-second timeout
                 receivedMsg = this.PhyProto.receive(CP_TIMEOUT);
-
-                // Verify the message is a CP protocol message
-                if (((PhyConfiguration) receivedMsg.getConfiguration()).getPid() != proto_id.CP) {
+                if (((PhyConfiguration) receivedMsg.getConfiguration()).getPid() != proto_id.CP)
                     return null;
-                }
 
-                //2b. Parse the message
                 Msg responseMsg = new CPCommandMsg(cookie, id);
                 responseMsg = ((CPCommandMsg) responseMsg).parse(receivedMsg.getData());
 
-                //2c. Check if the response matches the sent command message
                 String[] responseParts = responseMsg.getData().split("\\s+");
                 int receivedId = Integer.parseInt(responseParts[2]);
                 String successStatus = responseParts[3];
 
-                if(this.id == receivedId){
-                    if(successStatus.equals("ok")){
+                if (this.id == receivedId) {
+                    if (successStatus.equals("ok")) {
                         return responseMsg;
-                    } else if(successStatus.equals("error")){
+                    } else if (successStatus.equals("error")) {
                         break;
                     }
                 }
             } catch (SocketTimeoutException e) {
-                attempts++; // increment attempt counter if timeout occurs
+                attempts++;
             } catch (Exception e) {
-                attempts++; // increment attempt counter if exception occurs
+                attempts++;
             }
         }
 
         throw new CookieTimeoutException();
+    }
+
+    private void processCookieRequest(Msg receivedMsg) throws IOException, IWProtocolException {
+        PhyConfiguration clientConfig = (PhyConfiguration) receivedMsg.getConfiguration();
+
+        // Log that we've received a cookie request
+        System.out.println("Received a cookie request from: " + clientConfig);
+
+        // Check if we have space
+        if (!cookieMap.containsKey(clientConfig) && cookieMap.size() >= CP_HASHMAP_SIZE) {
+            // No space for a new client
+            System.out.println("Rejecting cookie request from " + clientConfig + " - too many clients.");
+            CPCookieResponseMsg response = new CPCookieResponseMsg(false);
+            String errorData = "too_many_clients";
+            response.create(errorData);
+            System.out.println("Sending NAK response to client.");
+            this.PhyProto.send(new String(response.getDataBytes()), clientConfig);
+            return;
+        }
+
+        // Generate a new cookie
+        int newCookieValue = rnd.nextInt(Integer.MAX_VALUE);
+        long now = System.currentTimeMillis();
+        Cookie newCookie = new Cookie(now, newCookieValue);
+        // Invalidate old cookie by overwriting
+        cookieMap.put(clientConfig, newCookie);
+
+        // Log that a new cookie was issued
+        System.out.println("Issued new cookie (" + newCookieValue + ") for client: " + clientConfig);
+
+
+        // Respond with ACK and the new cookie
+        CPCookieResponseMsg ackResponse = new CPCookieResponseMsg(true);
+        ackResponse.create(String.valueOf(newCookieValue));
+        System.out.println("Sending ACK response to client with cookie: " + newCookieValue);
+        this.PhyProto.send(new String(ackResponse.getDataBytes()), clientConfig);
     }
 
 
